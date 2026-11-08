@@ -348,6 +348,14 @@ macro_rules! service_proto_fut {
     }};
 }
 
+macro_rules! service_static_fallback {
+    ($proto:expr, $self:expr) => {{
+        let (f, rt, cb) = ($self.f, $self.rt.clone(), $self.ctx.callback.clone());
+        let (addr_local, addr_remote) = ($self.addr_local.clone(), $self.addr_remote.clone());
+        move |req| f(rt, cb, addr_local, addr_remote, req, $proto)
+    }};
+}
+
 macro_rules! service_impl {
     ($proto_marker:ty, $proto:expr) => {
         impl<F, Ret> hyper::service::Service<crate::http::HTTPRequest>
@@ -398,21 +406,21 @@ macro_rules! service_impl {
             type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
             fn call(&self, req: crate::http::HTTPRequest) -> Self::Future {
-                if let Some(static_match) = crate::files::match_static_file(
-                    req.uri().path(),
-                    &self.ctx.static_mounts,
-                    self.ctx.static_dir_to_file.as_ref(),
-                ) {
-                    if static_match.is_err() {
-                        return Box::pin(async move { Ok::<_, hyper::Error>(crate::http::response_404()) });
-                    }
-                    let expires = self.ctx.static_expires.clone();
-                    return Box::pin(async move {
-                        Ok::<_, hyper::Error>(crate::files::serve_static_file(static_match.unwrap(), expires).await)
-                    });
+                let candidates = crate::files::match_static_mounts(req.uri().path(), &self.ctx.static_mounts);
+                if candidates.is_empty() {
+                    return service_proto_fut!($proto, self, req);
                 }
 
-                service_proto_fut!($proto, self, req)
+                let dir_to_file = self.ctx.static_dir_to_file.clone();
+                let expires = self.ctx.static_expires.clone();
+                let app = service_static_fallback!($proto, self);
+                Box::pin(async move {
+                    match crate::files::match_static_file(candidates, dir_to_file).await {
+                        Some(Ok(path)) => Ok(crate::files::serve_static_file(path, expires).await),
+                        Some(Err(_)) => Ok(crate::http::response_404()),
+                        None => Ok(app(req).await),
+                    }
+                })
             }
         }
 
@@ -473,29 +481,32 @@ macro_rules! service_impl {
                     .req_handled
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                if let Some(static_match) = crate::files::match_static_file(
-                    req.uri().path(),
-                    &self.ctx.static_mounts,
-                    self.ctx.static_dir_to_file.as_ref(),
-                ) {
-                    self.ctx
-                        .metrics
-                        .req_static_handled
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if static_match.is_err() {
-                        self.ctx
-                            .metrics
-                            .req_static_err
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        return Box::pin(async move { Ok::<_, hyper::Error>(crate::http::response_404()) });
-                    }
-                    let expires = self.ctx.static_expires.clone();
-                    return Box::pin(async move {
-                        Ok::<_, hyper::Error>(crate::files::serve_static_file(static_match.unwrap(), expires).await)
-                    });
+                let candidates = crate::files::match_static_mounts(req.uri().path(), &self.ctx.static_mounts);
+                if candidates.is_empty() {
+                    return service_proto_fut!($proto, self, req);
                 }
 
-                service_proto_fut!($proto, self, req)
+                let dir_to_file = self.ctx.static_dir_to_file.clone();
+                let expires = self.ctx.static_expires.clone();
+                let metrics = self.ctx.metrics.clone();
+                let app = service_static_fallback!($proto, self);
+                Box::pin(async move {
+                    let Some(static_match) = crate::files::match_static_file(candidates, dir_to_file).await else {
+                        return Ok(app(req).await);
+                    };
+                    metrics
+                        .req_static_handled
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    match static_match {
+                        Ok(path) => Ok(crate::files::serve_static_file(path, expires).await),
+                        Err(_) => {
+                            metrics
+                                .req_static_err
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            Ok(crate::http::response_404())
+                        }
+                    }
+                })
             }
         }
     };

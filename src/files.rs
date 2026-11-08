@@ -12,13 +12,10 @@ use tokio_util::io::ReaderStream;
 
 use crate::http::{HTTPResponse, HV_SERVER, response_404};
 
-#[inline(always)]
-pub(crate) fn match_static_file(
-    uri_path: &str,
-    mounts: &Vec<(String, String)>,
-    dir_to_file: Option<&String>,
-) -> Option<Result<String>> {
+/// Candidate `(file path, mount point)` pairs for the mounts matching `uri_path`.
+pub(crate) fn match_static_mounts(uri_path: &str, mounts: &Vec<(String, String)>) -> Vec<(String, String)> {
     let decoded_uri_path = percent_decode_str(uri_path).decode_utf8_lossy();
+    let mut candidates = Vec::new();
     for (prefix, mount_point) in mounts {
         if let Some(file_path) = decoded_uri_path.strip_prefix(prefix) {
             if !file_path.is_empty() && !file_path.starts_with('/') {
@@ -30,33 +27,50 @@ pub(crate) fn match_static_file(
             #[cfg(windows)]
             let fpath = format!("{mount_point}{}", file_path.replace("/", "\\"));
 
-            match Path::new(&fpath).canonicalize() {
-                Ok(mut full_path) => {
-                    if full_path.is_dir() {
-                        match dir_to_file {
-                            Some(rewrite_file) => {
-                                full_path = full_path.join(rewrite_file);
-                            }
-                            None => return Some(Err(anyhow::anyhow!("dir"))),
+            candidates.push((fpath, mount_point.clone()));
+        }
+    }
+    candidates
+}
+
+// path resolution hits the filesystem, so keep it off the runtime threads (#647)
+pub(crate) async fn match_static_file(
+    candidates: Vec<(String, String)>,
+    dir_to_file: Option<String>,
+) -> Option<Result<String>> {
+    tokio::task::spawn_blocking(move || resolve_static_file(candidates, dir_to_file.as_ref()))
+        .await
+        .unwrap_or_else(|err| Some(Err(err.into())))
+}
+
+fn resolve_static_file(candidates: Vec<(String, String)>, dir_to_file: Option<&String>) -> Option<Result<String>> {
+    for (fpath, mount_point) in candidates {
+        match Path::new(&fpath).canonicalize() {
+            Ok(mut full_path) => {
+                if full_path.is_dir() {
+                    match dir_to_file {
+                        Some(rewrite_file) => {
+                            full_path = full_path.join(rewrite_file);
                         }
+                        None => return Some(Err(anyhow::anyhow!("dir"))),
                     }
-
-                    #[cfg(windows)]
-                    let full_path = {
-                        let str_path = full_path.display().to_string();
-                        std::path::PathBuf::from(str_path.strip_prefix(r"\\?\").unwrap_or(&str_path))
-                    };
-
-                    if full_path.starts_with(mount_point) {
-                        return full_path.to_str().map(ToOwned::to_owned).map(Ok);
-                    }
-                    return Some(Err(anyhow::anyhow!("outside mount path")));
                 }
-                Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                    return Some(Err(err.into()));
+
+                #[cfg(windows)]
+                let full_path = {
+                    let str_path = full_path.display().to_string();
+                    std::path::PathBuf::from(str_path.strip_prefix(r"\\?\").unwrap_or(&str_path))
+                };
+
+                if full_path.starts_with(&mount_point) {
+                    return full_path.to_str().map(ToOwned::to_owned).map(Ok);
                 }
-                _ => {}
+                return Some(Err(anyhow::anyhow!("outside mount path")));
             }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                return Some(Err(err.into()));
+            }
+            _ => {}
         }
     }
     None
