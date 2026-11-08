@@ -38,6 +38,16 @@ async def test_body(wsgi_server, runtime_mode):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('runtime_mode', ['mt', 'st'])
+async def test_body_lines(wsgi_server, runtime_mode):
+    async with wsgi_server(runtime_mode) as port:
+        res = httpx.post(f'http://localhost:{port}/echo_lines', content='a\nbc\n\nd')
+
+    assert res.status_code == 200
+    assert res.json() == ['a\n', 'bc\n', '\n', 'd']
+
+
+@pytest.mark.asyncio
 @pytest.mark.skipif(not bool(os.getenv('PGO_RUN')), reason='not PGO build')
 @pytest.mark.parametrize('runtime_mode', ['mt', 'st'])
 async def test_body_large(wsgi_server, runtime_mode):

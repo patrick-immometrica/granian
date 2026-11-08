@@ -22,6 +22,11 @@ def echo(environ, protocol):
     return [environ['wsgi.input'].read()]
 
 
+def echo_lines(environ, protocol):
+    protocol('200 OK', [('content-type', 'application/json')])
+    return [json.dumps([line.decode() for line in environ['wsgi.input']]).encode('utf8')]
+
+
 def iterbody(environ, protocol):
     def response():
         for _ in range(0, 3):
@@ -36,6 +41,6 @@ def err_app(environ, protocol):
 
 
 def app(environ, protocol):
-    return {'/info': info, '/echo': echo, '/iterbody': iterbody, '/err_app': err_app}[environ['PATH_INFO']](
+    return {'/info': info, '/echo': echo, '/echo_lines': echo_lines, '/iterbody': iterbody, '/err_app': err_app}[environ['PATH_INFO']](
         environ, protocol
     )

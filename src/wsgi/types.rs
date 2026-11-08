@@ -41,10 +41,10 @@ impl WSGIBody {
         buffering: WSGIBodyBuffering,
     ) {
         let mut buffer = buffer.lock().unwrap();
-        if let WSGIBodyBuffering::Size(size) = buffering
-            && buffer.len() >= size
-        {
-            return;
+        match buffering {
+            WSGIBodyBuffering::Line if buffer.contains(&LINE_SPLIT) => return,
+            WSGIBodyBuffering::Size(size) if buffer.len() >= size => return,
+            _ => {}
         }
 
         let mut guard = stream.lock().await;
@@ -84,7 +84,7 @@ impl WSGIBody {
         buffer
             .iter()
             .position(|&c| c == LINE_SPLIT)
-            .map(|next_split| buffer.split_to(next_split).freeze())
+            .map(|next_split| buffer.split_to(next_split + 1).freeze())
             .unwrap_or_else(|| {
                 let len = buffer.len();
                 buffer.split_to(len).freeze()
