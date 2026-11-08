@@ -34,6 +34,29 @@ impl WSGIBody {
         }
     }
 
+    fn _read_all(&self, py: Python) -> Bytes {
+        let inner = self.inner.clone();
+        let rest = py.detach(|| {
+            self.rt.inner.block_on(async move {
+                let mut inner = inner.lock().await;
+                match inner.take() {
+                    Some(stream) => BodyExt::collect(stream)
+                        .await
+                        .map_or(Bytes::new(), http_body_util::Collected::to_bytes),
+                    None => Bytes::new(),
+                }
+            })
+        });
+
+        // data already pulled by sized reads or readline comes first
+        let mut buffer = self.buffer.lock().unwrap();
+        if buffer.is_empty() {
+            return rest;
+        }
+        buffer.put(rest);
+        buffer.split().freeze()
+    }
+
     #[allow(clippy::await_holding_lock)]
     async fn fill_buffer(
         stream: Arc<AsyncMutex<Option<http_body_util::BodyStream<body::Incoming>>>>,
@@ -109,20 +132,7 @@ impl WSGIBody {
     #[pyo3(signature = (size=None))]
     fn read(&self, py: Python, size: Option<usize>) -> Bytes {
         match size {
-            None => {
-                let inner = self.inner.clone();
-                py.detach(|| {
-                    self.rt.inner.block_on(async move {
-                        let mut inner = inner.lock().await;
-                        match inner.take() {
-                            Some(stream) => BodyExt::collect(stream)
-                                .await
-                                .map_or(Bytes::new(), http_body_util::Collected::to_bytes),
-                            None => Bytes::new(),
-                        }
-                    })
-                })
-            }
+            None => self._read_all(py),
             Some(size) => match size {
                 0 => Bytes::new(),
                 size => {
@@ -149,20 +159,9 @@ impl WSGIBody {
 
     #[pyo3(signature = (_hint=None))]
     fn readlines<'p>(&self, py: Python<'p>, _hint: Option<Py<PyAny>>) -> PyResult<Bound<'p, PyList>> {
-        let inner = self.inner.clone();
-        let data = py.detach(|| {
-            self.rt.inner.block_on(async move {
-                let mut inner = inner.lock().await;
-                match inner.take() {
-                    Some(stream) => BodyExt::collect(stream)
-                        .await
-                        .map_or(Bytes::new(), http_body_util::Collected::to_bytes),
-                    None => Bytes::new(),
-                }
-            })
-        });
+        let data = self._read_all(py);
         let lines: Vec<Bound<PyBytes>> = data
-            .split(|&c| c == LINE_SPLIT)
+            .split_inclusive(|&c| c == LINE_SPLIT)
             .map(|item| PyBytes::new(py, item))
             .collect();
         PyList::new(py, lines)

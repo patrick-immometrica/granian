@@ -31,11 +31,23 @@ def iterbody(environ, protocol):
     return response()
 
 
+def read_mixed(environ, protocol):
+    body = environ['wsgi.input']
+    protocol('200 OK', [('content-type', 'application/json')])
+    return [json.dumps([body.read(3).decode(), body.read().decode()]).encode('utf8')]
+
+
+def readlines(environ, protocol):
+    body = environ['wsgi.input']
+    protocol('200 OK', [('content-type', 'application/json')])
+    return [json.dumps([body.read(1).decode()] + [line.decode() for line in body.readlines()]).encode('utf8')]
+
+
 def err_app(environ, protocol):
     1 / 0
 
 
 def app(environ, protocol):
-    return {'/info': info, '/echo': echo, '/iterbody': iterbody, '/err_app': err_app}[environ['PATH_INFO']](
+    return {'/info': info, '/echo': echo, '/iterbody': iterbody, '/err_app': err_app, '/read_mixed': read_mixed, '/readlines': readlines}[environ['PATH_INFO']](
         environ, protocol
     )

@@ -67,3 +67,23 @@ async def test_app_error(wsgi_server, runtime_mode):
         res = httpx.get(f'http://localhost:{port}/err_app')
 
     assert res.status_code == 500
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('runtime_mode', ['mt', 'st'])
+async def test_body_read_after_sized_read(wsgi_server, runtime_mode):
+    async with wsgi_server(runtime_mode) as port:
+        res = httpx.post(f'http://localhost:{port}/read_mixed', content='abcdef')
+
+    assert res.status_code == 200
+    assert res.json() == ['abc', 'def']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('runtime_mode', ['mt', 'st'])
+async def test_body_readlines(wsgi_server, runtime_mode):
+    async with wsgi_server(runtime_mode) as port:
+        res = httpx.post(f'http://localhost:{port}/readlines', content='ab\ncd\n')
+
+    assert res.status_code == 200
+    assert res.json() == ['a', 'b\n', 'cd\n']
