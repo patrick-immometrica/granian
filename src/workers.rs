@@ -971,10 +971,38 @@ macro_rules! acceptor_impl_stream {
     }};
 }
 
+// Errors like EMFILE leave the listener readable, so accepting again right away spins.
+trait AcceptError {
+    fn needs_backoff(&self) -> bool;
+}
+
+impl AcceptError for std::io::Error {
+    fn needs_backoff(&self) -> bool {
+        !matches!(
+            self.kind(),
+            std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::ConnectionRefused
+                | std::io::ErrorKind::ConnectionReset
+        )
+    }
+}
+
+impl<TE: std::error::Error, A> AcceptError for tls_listener::Error<std::io::Error, TE, A> {
+    fn needs_backoff(&self) -> bool {
+        match self {
+            tls_listener::Error::ListenerError(err) => err.needs_backoff(),
+            _ => false,
+        }
+    }
+}
+
 macro_rules! acceptor_impl_err {
     ($err:expr, $permit:expr) => {{
         log::debug!("TCP handshake failed with error: {:?}", $err);
         drop($permit);
+        if AcceptError::needs_backoff(&$err) {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
     }};
 }
 
